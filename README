@@ -1,0 +1,24 @@
+简介:
+用户给出npm库的名称，程序会使用npm的access token来扫描该库最近一年的版本信息,并输出excel文件.
+
+范例说明:
+输入:
+1. 代理用户名: admin, 代理密码: password, httpproxy: http://proxy.example.com:8080, httpsproxy: http://proxy.example.com:8080
+2. 用户给出的库名在当前目录下: ./RN三方库.xlsx
+3. 用户给出的npm access token: xxxxxxxxxxxxxxxxx
+输出:
+1. 输出扫描结果文件: ./RN三方库-扫描结果.xlsx
+
+
+工具实现要求:
+1. 需要用proxy来发起请求
+: 输入代理用户名
+: 输入代理密码
+: 输入httpproxy地址
+: 输入httpsproxy地址
+2. 用户输入npm库名称文件
+3. 用户输入npm账户的access token
+4. 使用access token扫描npm库最近一年的版本信息
+5. 输出扫描结果到excel文件
+
+实现语言: Python
