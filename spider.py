@@ -6,6 +6,8 @@ import openpyxl
 from datetime import datetime, timedelta, timezone
 import sys
 from getpass import getpass
+from concurrent.futures import ThreadPoolExecutor, as_completed
+import threading
 
 
 def setup_proxy(username, password, http_proxy, https_proxy):
@@ -92,12 +94,38 @@ def filter_versions_last_year(package_data):
                     'dependencies': len(version_data.get('dependencies', {}))
                 })
         except Exception as e:
-            print(f"处理版本 {version} 时出错: {e}")
+            # 静默处理错误，不打印
             continue
     
     # 按发布时间排序
     versions_info.sort(key=lambda x: x['publish_time'], reverse=True)
     return versions_info
+
+
+def scan_single_package(package_name, access_token, proxies, lock, progress):
+    """扫描单个npm包的版本信息（用于多线程）"""
+    try:
+        package_data = get_package_versions(package_name, access_token, proxies)
+        
+        if package_data:
+            versions = filter_versions_last_year(package_data)
+            result = versions
+            status_msg = f"✓ 找到 {len(versions)} 个2025年的版本"
+        else:
+            result = None
+            status_msg = "✗ 获取失败"
+        
+        # 线程安全地更新进度
+        with lock:
+            progress['completed'] += 1
+            print(f"[{progress['completed']}/{progress['total']}] {package_name}: {status_msg}")
+        
+        return package_name, result
+    except Exception as e:
+        with lock:
+            progress['completed'] += 1
+            print(f"[{progress['completed']}/{progress['total']}] {package_name}: ✗ 异常: {e}")
+        return package_name, None
 
 
 def write_results_to_excel(results, output_file):
@@ -211,19 +239,29 @@ def main():
     
     # 5. 扫描每个包的版本信息
     print("\n开始扫描npm包版本信息...")
-    results = {}
+    print("使用多线程并发扫描，请稍候...\n")
     
-    for i, package in enumerate(packages, 1):
-        print(f"[{i}/{len(packages)}] 正在扫描: {package}")
-        package_data = get_package_versions(package, access_token, proxies)
+    results = {}
+    lock = threading.Lock()
+    progress = {'completed': 0, 'total': len(packages)}
+    
+    # 使用线程池并发扫描，max_workers控制并发数
+    with ThreadPoolExecutor(max_workers=15) as executor:
+        # 提交所有任务
+        future_to_package = {
+            executor.submit(scan_single_package, package, access_token, proxies, lock, progress): package 
+            for package in packages
+        }
         
-        if package_data:
-            versions = filter_versions_last_year(package_data)
-            results[package] = versions
-            print(f"  ✓ 找到 {len(versions)} 个2025年的版本")
-        else:
-            results[package] = None
-            print(f"  ✗ 获取失败")
+        # 收集结果
+        for future in as_completed(future_to_package):
+            try:
+                package_name, result = future.result()
+                results[package_name] = result
+            except Exception as e:
+                package_name = future_to_package[future]
+                results[package_name] = None
+                print(f"处理 {package_name} 时发生异常: {e}")
     
     # 6. 输出结果到Excel
     print("\n正在生成结果文件...")
@@ -234,10 +272,12 @@ def main():
     write_results_to_excel(results, output_file)
     
     # 统计信息
-    total_versions = sum(len(versions) for versions in results.values())
+    total_versions = sum(len(versions) for versions in results.values() if versions is not None)
+    failed_count = sum(1 for versions in results.values() if versions is None)
     print("\n" + "=" * 60)
     print("扫描完成!")
     print(f"共扫描 {len(packages)} 个npm包")
+    print(f"查找失败 {failed_count} 个npm包")
     print(f"找到 {total_versions} 个2025年发布的版本")
     print("=" * 60)
 
