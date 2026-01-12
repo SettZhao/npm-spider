@@ -151,8 +151,8 @@ def main():
     if proxy_username:
         proxy_password = getpass("代理密码: ")
     
-    http_proxy = input("HTTP Proxy (例如: http://proxy.huawei.com:8080): ").strip()
-    https_proxy = input("HTTPS Proxy (例如: http://proxy.huawei.com:8080): ").strip()
+    http_proxy = input("HTTP Proxy (例如: http://proxy.example.com:8080): ").strip()
+    https_proxy = input("HTTPS Proxy (例如: http://proxy.example.com:8080): ").strip()
     
     proxies = None
     if http_proxy or https_proxy:
