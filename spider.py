@@ -63,11 +63,14 @@ def get_package_versions(package_name, access_token, proxies):
 
 
 def filter_versions_last_year(package_data):
-    """筛选最近一年的版本信息"""
+    """筛选2025年的版本信息"""
     if not package_data or 'time' not in package_data:
         return []
     
-    one_year_ago = datetime.now(timezone.utc) - timedelta(days=365)
+    # 2025年1月1日 00:00:00 UTC
+    year_2025_start = datetime(2025, 1, 1, 0, 0, 0, tzinfo=timezone.utc)
+    # 2026年1月1日 00:00:00 UTC
+    year_2025_end = datetime(2026, 1, 1, 0, 0, 0, tzinfo=timezone.utc)
     versions_info = []
     
     time_info = package_data.get('time', {})
@@ -79,7 +82,7 @@ def filter_versions_last_year(package_data):
         
         try:
             publish_date = datetime.fromisoformat(publish_time.replace('Z', '+00:00'))
-            if publish_date >= one_year_ago:
+            if year_2025_start <= publish_date < year_2025_end:
                 version_data = versions.get(version, {})
                 versions_info.append({
                     'version': version,
@@ -100,20 +103,24 @@ def filter_versions_last_year(package_data):
 def write_results_to_excel(results, output_file):
     """将扫描结果写入Excel文件"""
     wb = openpyxl.Workbook()
-    ws = wb.active
-    ws.title = "扫描结果"
+    
+    # 第一个sheet：详细版本信息
+    ws1 = wb.active
+    ws1.title = "详细版本信息"
     
     # 写入表头
     headers = ['包名', '版本', '发布时间', '描述', '作者', '依赖数量']
-    ws.append(headers)
+    ws1.append(headers)
     
     # 写入数据
     for package_name, versions in results.items():
-        if not versions:
-            ws.append([package_name, '未找到最近一年的版本', '', '', '', ''])
+        if versions is None:
+            ws1.append([package_name, '查找失败', '', '', '', ''])
+        elif not versions:
+            ws1.append([package_name, '未找到2025年的版本', '', '', '', ''])
         else:
             for version_info in versions:
-                ws.append([
+                ws1.append([
                     package_name,
                     version_info['version'],
                     version_info['publish_time'],
@@ -123,7 +130,7 @@ def write_results_to_excel(results, output_file):
                 ])
     
     # 调整列宽
-    for column in ws.columns:
+    for column in ws1.columns:
         max_length = 0
         column_letter = column[0].column_letter
         for cell in column:
@@ -133,7 +140,31 @@ def write_results_to_excel(results, output_file):
             except:
                 pass
         adjusted_width = min(max_length + 2, 50)
-        ws.column_dimensions[column_letter].width = adjusted_width
+        ws1.column_dimensions[column_letter].width = adjusted_width
+    
+    # 第二个sheet：统计信息
+    ws2 = wb.create_sheet(title="版本统计")
+    ws2.append(['库名', '2025年发布版本数量'])
+    
+    # 写入统计数据
+    for package_name, versions in results.items():
+        if versions is None:
+            ws2.append([package_name, '查找失败'])
+        else:
+            ws2.append([package_name, len(versions)])
+    
+    # 调整统计页列宽
+    for column in ws2.columns:
+        max_length = 0
+        column_letter = column[0].column_letter
+        for cell in column:
+            try:
+                if cell.value:
+                    max_length = max(max_length, len(str(cell.value)))
+            except:
+                pass
+        adjusted_width = min(max_length + 2, 50)
+        ws2.column_dimensions[column_letter].width = adjusted_width
     
     wb.save(output_file)
     print(f"\n扫描结果已保存到: {output_file}")
@@ -189,9 +220,9 @@ def main():
         if package_data:
             versions = filter_versions_last_year(package_data)
             results[package] = versions
-            print(f"  ✓ 找到 {len(versions)} 个最近一年的版本")
+            print(f"  ✓ 找到 {len(versions)} 个2025年的版本")
         else:
-            results[package] = []
+            results[package] = None
             print(f"  ✗ 获取失败")
     
     # 6. 输出结果到Excel
@@ -207,7 +238,7 @@ def main():
     print("\n" + "=" * 60)
     print("扫描完成!")
     print(f"共扫描 {len(packages)} 个npm包")
-    print(f"找到 {total_versions} 个最近一年的版本")
+    print(f"找到 {total_versions} 个2025年发布的版本")
     print("=" * 60)
 
 
