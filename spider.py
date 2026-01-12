@@ -10,15 +10,6 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import threading
 import json
 import os
-import signal
-
-# 全局中断标志
-interrupt_flag = threading.Event()
-
-def signal_handler(signum, frame):
-    """处理Ctrl+C中断信号"""
-    print("\n\n检测到中断信号(Ctrl+C)...", flush=True)
-    interrupt_flag.set()
 
 
 def setup_proxy(username, password, http_proxy, https_proxy):
@@ -115,10 +106,6 @@ def filter_versions_last_year(package_data):
 
 def scan_single_package(package_name, access_token, proxies, lock, progress):
     """扫描单个npm包的版本信息（用于多线程）"""
-    # 检查是否收到中断信号
-    if interrupt_flag.is_set():
-        return package_name, None
-    
     try:
         package_data = get_package_versions(package_name, access_token, proxies)
         
@@ -133,47 +120,14 @@ def scan_single_package(package_name, access_token, proxies, lock, progress):
         # 线程安全地更新进度
         with lock:
             progress['completed'] += 1
-            print(f"[{progress['completed']}/{progress['total']}] {package_name}: {status_msg}", flush=True)
+            print(f"[{progress['completed']}/{progress['total']}] {package_name}: {status_msg}")
         
         return package_name, result
     except Exception as e:
         with lock:
             progress['completed'] += 1
-            print(f"[{progress['completed']}/{progress['total']}] {package_name}: ✗ 异常: {e}", flush=True)
+            print(f"[{progress['completed']}/{progress['total']}] {package_name}: ✗ 异常: {e}")
         return package_name, None
-
-
-def save_progress(progress_file, results, scanned_packages, all_packages):
-    """保存扫描进度"""
-    progress_data = {
-        'scanned_packages': scanned_packages,
-        'all_packages': all_packages,
-        'results': results
-    }
-    with open(progress_file, 'w', encoding='utf-8') as f:
-        json.dump(progress_data, f, ensure_ascii=False, indent=2)
-
-
-def load_progress(progress_file):
-    """加载扫描进度"""
-    if not os.path.exists(progress_file):
-        return None
-    
-    try:
-        with open(progress_file, 'r', encoding='utf-8') as f:
-            return json.load(f)
-    except Exception as e:
-        print(f"加载进度文件失败: {e}")
-        return None
-
-
-def remove_progress_file(progress_file):
-    """删除进度文件"""
-    if os.path.exists(progress_file):
-        try:
-            os.remove(progress_file)
-        except Exception as e:
-            print(f"删除进度文件失败: {e}")
 
 
 def write_results_to_excel(results, output_file):
@@ -285,65 +239,16 @@ def main():
     packages = read_npm_packages(input_file)
     print(f"✓ 共读取到 {len(packages)} 个npm包")
     
-    # 检查是否有未完成的进度
-    progress_file = input_file.replace('.xlsx', '-progress.json')
-    results = {}
-    scanned_packages = []
-    
-    saved_progress = load_progress(progress_file)
-    if saved_progress:
-        print(f"\n发现未完成的扫描进度:")
-        print(f"  已扫描: {len(saved_progress['scanned_packages'])} 个")
-        print(f"  待扫描: {len(packages) - len(saved_progress['scanned_packages'])} 个")
-        
-        resume = input("\n是否继续上次的扫描? (y/n): ").strip().lower()
-        if resume == 'y':
-            results = saved_progress['results']
-            scanned_packages = saved_progress['scanned_packages']
-            packages = [pkg for pkg in packages if pkg not in scanned_packages]
-            print(f"✓ 已恢复进度，将继续扫描剩余 {len(packages)} 个npm包")
-        else:
-            print("✓ 将开始全新扫描")
-            remove_progress_file(progress_file)
-    
-    if not packages:
-        print("\n所有包已扫描完成！")
-        remove_progress_file(progress_file)
-        
-        # 输出结果
-        output_file = input_file.replace('.xlsx', '-扫描结果.xlsx')
-        if output_file == input_file:
-            output_file = input_file.replace('.xlsx', '') + '-扫描结果.xlsx'
-        write_results_to_excel(results, output_file)
-        
-        # 统计信息
-        total_versions = sum(len(versions) for versions in results.values() if versions is not None)
-        failed_count = sum(1 for versions in results.values() if versions is None)
-        print("\n" + "=" * 60)
-        print("扫描完成!")
-        print(f"共扫描 {len(results)} 个npm包")
-        print(f"查找失败 {failed_count} 个npm包")
-        print(f"找到 {total_versions} 个2025年发布的版本")
-        print("=" * 60)
-        return
-    
     # 5. 扫描每个包的版本信息
     print("\n开始扫描npm包版本信息...")
-    print("使用多线程并发扫描，请稍候...")
-    print("提示: 按 Ctrl+C 可中断扫描并保存当前进度\n")
+    print("使用多线程并发扫描，请稍候...\n")
     
-    all_packages_original = read_npm_packages(input_file)  # 保存完整列表用于进度保存
+    results = {}
     lock = threading.Lock()
     progress = {'completed': 0, 'total': len(packages)}
     
-    # 设置信号处理器
-    signal.signal(signal.SIGINT, signal_handler)
-    
-    executor = None
-    try:
-        # 使用线程池并发扫描，max_workers控制并发数
-        executor = ThreadPoolExecutor(max_workers=15)
-        
+    # 使用线程池并发扫描，max_workers控制并发数
+    with ThreadPoolExecutor(max_workers=15) as executor:
         # 提交所有任务
         future_to_package = {
             executor.submit(scan_single_package, package, access_token, proxies, lock, progress): package 
@@ -352,46 +257,13 @@ def main():
         
         # 收集结果
         for future in as_completed(future_to_package):
-            # 检查中断标志
-            if interrupt_flag.is_set():
-                print("\n正在停止扫描...", flush=True)
-                break
-            
             try:
-                package_name, result = future.result(timeout=1)
+                package_name, result = future.result()
                 results[package_name] = result
-                scanned_packages.append(package_name)
-                
-                # 每10个包保存一次进度
-                if len(scanned_packages) % 10 == 0:
-                    save_progress(progress_file, results, scanned_packages, all_packages_original)
             except Exception as e:
                 package_name = future_to_package[future]
                 results[package_name] = None
-                scanned_packages.append(package_name)
-                if not interrupt_flag.is_set():
-                    print(f"处理 {package_name} 时发生异常: {e}", flush=True)
-        
-        # 如果是中断，保存进度
-        if interrupt_flag.is_set():
-            print("\n正在保存当前进度...", flush=True)
-            save_progress(progress_file, results, scanned_packages, all_packages_original)
-            print(f"✓ 进度已保存到: {progress_file}")
-            print(f"✓ 已扫描 {len(scanned_packages)} 个包")
-            print("\n下次运行程序时可以选择继续扫描")
-        else:
-            # 扫描完成，删除进度文件
-            remove_progress_file(progress_file)
-        
-    finally:
-        # 确保线程池被正确关闭
-        if executor:
-            print("\n正在关闭线程池...", flush=True)
-            executor.shutdown(wait=False, cancel_futures=True)
-    
-    # 如果是中断，退出
-    if interrupt_flag.is_set():
-        sys.exit(0)
+                print(f"处理 {package_name} 时发生异常: {e}")
     
     # 6. 输出结果到Excel
     print("\n正在生成结果文件...")
