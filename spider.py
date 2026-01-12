@@ -10,6 +10,15 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import threading
 import json
 import os
+import signal
+
+# 全局中断标志
+interrupt_flag = threading.Event()
+
+def signal_handler(signum, frame):
+    """处理Ctrl+C中断信号"""
+    print("\n\n检测到中断信号(Ctrl+C)...", flush=True)
+    interrupt_flag.set()
 
 
 def setup_proxy(username, password, http_proxy, https_proxy):
@@ -106,6 +115,10 @@ def filter_versions_last_year(package_data):
 
 def scan_single_package(package_name, access_token, proxies, lock, progress):
     """扫描单个npm包的版本信息（用于多线程）"""
+    # 检查是否收到中断信号
+    if interrupt_flag.is_set():
+        return package_name, None
+    
     try:
         package_data = get_package_versions(package_name, access_token, proxies)
         
@@ -120,13 +133,13 @@ def scan_single_package(package_name, access_token, proxies, lock, progress):
         # 线程安全地更新进度
         with lock:
             progress['completed'] += 1
-            print(f"[{progress['completed']}/{progress['total']}] {package_name}: {status_msg}")
+            print(f"[{progress['completed']}/{progress['total']}] {package_name}: {status_msg}", flush=True)
         
         return package_name, result
     except Exception as e:
         with lock:
             progress['completed'] += 1
-            print(f"[{progress['completed']}/{progress['total']}] {package_name}: ✗ 异常: {e}")
+            print(f"[{progress['completed']}/{progress['total']}] {package_name}: ✗ 异常: {e}", flush=True)
         return package_name, None
 
 
@@ -323,40 +336,61 @@ def main():
     lock = threading.Lock()
     progress = {'completed': 0, 'total': len(packages)}
     
+    # 设置信号处理器
+    signal.signal(signal.SIGINT, signal_handler)
+    
+    executor = None
     try:
         # 使用线程池并发扫描，max_workers控制并发数
-        with ThreadPoolExecutor(max_workers=15) as executor:
-            # 提交所有任务
-            future_to_package = {
-                executor.submit(scan_single_package, package, access_token, proxies, lock, progress): package 
-                for package in packages
-            }
+        executor = ThreadPoolExecutor(max_workers=15)
+        
+        # 提交所有任务
+        future_to_package = {
+            executor.submit(scan_single_package, package, access_token, proxies, lock, progress): package 
+            for package in packages
+        }
+        
+        # 收集结果
+        for future in as_completed(future_to_package):
+            # 检查中断标志
+            if interrupt_flag.is_set():
+                print("\n正在停止扫描...", flush=True)
+                break
             
-            # 收集结果
-            for future in as_completed(future_to_package):
-                try:
-                    package_name, result = future.result()
-                    results[package_name] = result
-                    scanned_packages.append(package_name)
-                    
-                    # 每10个包保存一次进度
-                    if len(scanned_packages) % 10 == 0:
-                        save_progress(progress_file, results, scanned_packages, all_packages_original)
-                except Exception as e:
-                    package_name = future_to_package[future]
-                    results[package_name] = None
-                    scanned_packages.append(package_name)
-                    print(f"处理 {package_name} 时发生异常: {e}")
+            try:
+                package_name, result = future.result(timeout=1)
+                results[package_name] = result
+                scanned_packages.append(package_name)
+                
+                # 每10个包保存一次进度
+                if len(scanned_packages) % 10 == 0:
+                    save_progress(progress_file, results, scanned_packages, all_packages_original)
+            except Exception as e:
+                package_name = future_to_package[future]
+                results[package_name] = None
+                scanned_packages.append(package_name)
+                if not interrupt_flag.is_set():
+                    print(f"处理 {package_name} 时发生异常: {e}", flush=True)
         
-        # 扫描完成，删除进度文件
-        remove_progress_file(progress_file)
+        # 如果是中断，保存进度
+        if interrupt_flag.is_set():
+            print("\n正在保存当前进度...", flush=True)
+            save_progress(progress_file, results, scanned_packages, all_packages_original)
+            print(f"✓ 进度已保存到: {progress_file}")
+            print(f"✓ 已扫描 {len(scanned_packages)} 个包")
+            print("\n下次运行程序时可以选择继续扫描")
+        else:
+            # 扫描完成，删除进度文件
+            remove_progress_file(progress_file)
         
-    except KeyboardInterrupt:
-        print("\n\n检测到中断信号，正在保存当前进度...")
-        save_progress(progress_file, results, scanned_packages, all_packages_original)
-        print(f"✓ 进度已保存到: {progress_file}")
-        print(f"✓ 已扫描 {len(scanned_packages)} 个包")
-        print("\n下次运行程序时可以选择继续扫描")
+    finally:
+        # 确保线程池被正确关闭
+        if executor:
+            print("\n正在关闭线程池...", flush=True)
+            executor.shutdown(wait=False, cancel_futures=True)
+    
+    # 如果是中断，退出
+    if interrupt_flag.is_set():
         sys.exit(0)
     
     # 6. 输出结果到Excel
